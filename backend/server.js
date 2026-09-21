@@ -1,63 +1,135 @@
-import express from 'express';
-import cors from 'cors';
-import crypto from 'crypto';
-import https from 'https';
-import fs from 'fs';
-import path from 'path';
+
+const express=require('express');
+const cors=require('cors');
+const fs=require('fs');
+const path=require('path');
 const app=express();
-app.use(cors({origin:'*'}));
-app.use(express.json({limit:'2mb'}));
-const APP_KEY='6tnym1br6idh7';
-const APP_SECRET=process.env.NEXCONN_APP_SECRET||'yWj2hyXUWFJ';
-const DATA_FILE=path.join(process.cwd(),'whispr_users.json');
-const ADMIN_KEY=process.env.ADMIN_KEY||'WhisprAdmin2026@Sparsh';
-const MANUAL_TOKENS={'sandy':'9liwjkuFBPUkyNJZpPSITWa8YGB0ycnYGd19V1ycXiE=@3e1z.sg.rongnav.com;3e1z.sg.rongcfg.com','admin':'9liwjkuFBPUkyNJZpPSITWa8YGB0ycnYGd19V1ycXiE=@3e1z.sg.rongnav.com;3e1z.sg.rongcfg.com'};
+app.use(cors());
+app.use(express.json());
+
+const DB_FILE=path.join(__dirname,'users.json');
+const MSG_FILE=path.join(__dirname,'messages.json');
 let usersDB={};
-try{if(fs.existsSync(DATA_FILE)){usersDB=JSON.parse(fs.readFileSync(DATA_FILE,'utf8'));}}catch(e){usersDB={};}
-function saveDB(){try{fs.writeFileSync(DATA_FILE,JSON.stringify(usersDB,null,2));}catch(e){}}
-function getSignature(n,t){return crypto.createHash('sha1').update(APP_SECRET+n+t).digest('hex');}
-function requestTokenSG(userId){return new Promise((resolve,reject)=>{const nonce=Math.floor(Math.random()*1000000).toString();const timestamp=Date.now().toString();const signature=getSignature(nonce,timestamp);const body=new URLSearchParams({userId,name:userId,portraitUri:`https://api.dicebear.com/7.x/avataaars/svg?seed=${userId}`}).toString();const endpoints=['api.sg.ronghub.com','api.sg.rongcloud.cn'];let tried=0;function tryNext(){if(tried>=endpoints.length){reject(new Error('SG failed'));return;}const hostname=endpoints[tried++];const req=https.request({hostname,path:'/user/getToken.json',method:'POST',headers:{'App-Key':APP_KEY,'Nonce':nonce,'Timestamp':timestamp,'Signature':signature,'Content-Type':'application/x-www-form-urlencoded','Content-Length':Buffer.byteLength(body)},timeout:10000},res=>{let d='';res.on('data',c=>d+=c);res.on('end',()=>{try{const j=JSON.parse(d);if(j.code===200&&j.token)resolve(j);else tryNext();}catch{tryNext();}});});req.on('error',()=>tryNext());req.on('timeout',()=>{req.destroy();tryNext();});req.write(body);req.end();}tryNext();});}
-function calcAge(dobStr){const dob=new Date(dobStr);const diff=Date.now()-dob.getTime();const ageDt=new Date(diff);return Math.abs(ageDt.getUTCFullYear()-1970);}
-app.get('/',(req,res)=>{res.json({status:'Whispr - Sandeep Samridhi Bani Sparsh',totalUsers:Object.keys(usersDB).length});});
-app.post('/api/register',async(req,res)=>{const{userId,email,dob,gender,location,bio,interests,lookingFor,profession}=req.body;if(!userId||!email||!dob)return res.status(400).json({error:'userId,email,dob required'});if(userId.length<3||!/^[a-zA-Z0-9_]+$/.test(userId))return res.status(400).json({error:'Username min 3'});const emailRegex=/^[^\s@]+@[^\s@]+\.[^\s@]+$/;if(!emailRegex.test(email))return res.status(400).json({error:'Invalid email'});const age=calcAge(dob);if(isNaN(age)||age<16)return res.status(400).json({error:'Must be 16+ age '+age,blocked:true});if(usersDB[userId])return res.status(409).json({error:'Username taken'});let tokenRes=null;if(MANUAL_TOKENS[userId])tokenRes={token:MANUAL_TOKENS[userId]};else{try{tokenRes=await requestTokenSG(userId);}catch(e){tokenRes={token:`temp_${userId}_${Date.now()}@3e1z.sg.rongnav.com;3e1z.sg.rongcfg.com`};}}const newUser={userId,email,dob,age,gender:gender||'Not specified',state:req.body.state||'',country:req.body.country||'',location:location||((req.body.state||'')+', '+(req.body.country||'')).trim(),bio:bio||'',interests:interests||[],lookingFor:lookingFor||'',profession:profession||'',avatar:`https://api.dicebear.com/7.x/avataaars/svg?seed=${userId}`,token:tokenRes.token,createdAt:new Date().toISOString(),lastActive:new Date().toISOString(),ip:req.ip,isAdmin:userId==='admin',isPrime:false};usersDB[userId]=newUser;saveDB();res.json({success:true,user:newUser,accessToken:newUser.token,token:newUser.token});});
-app.post('/api/login',(req,res)=>{const{userId,email}=req.body;if(!userId)return res.status(400).json({error:'userId required'});const u=usersDB[userId];if(!u)return res.status(404).json({error:'User not found'});if(email&&u.email&&email.toLowerCase()!==u.email.toLowerCase())return res.status(401).json({error:'Email mismatch'});u.lastActive=new Date().toISOString();saveDB();res.json({success:true,user:u,accessToken:u.token,token:u.token});});
-app.get('/api/users',(req,res)=>{
-  const{search,minAge,maxAge,gender,state,country,location,interest,requesterId}=req.query;
-  let list=Object.values(usersDB);
-  // Prime check for Female search
-  if(gender==='Female'){
-    const requester = requesterId ? usersDB[requesterId] : null;
-    const isPrime = requester && requester.isPrime && new Date(requester.primeExpiry) > new Date();
-    const isAdmin = requesterId==='admin' || (requester && requester.isAdmin);
-    if(!isPrime && !isAdmin){
-      return res.status(403).json({error:'Prime required to search Female',primeRequired:true,price:'INR 399/year'});
-    }
+let messagesDB={}; // { chatId: [ {from, to, text, time, id} ] }
+
+try{if(fs.existsSync(DB_FILE)){usersDB=JSON.parse(fs.readFileSync(DB_FILE,'utf8'));}}catch(e){usersDB={};}
+try{if(fs.existsSync(MSG_FILE)){messagesDB=JSON.parse(fs.readFileSync(MSG_FILE,'utf8'));}}catch(e){messagesDB={};}
+
+function saveDB(){fs.writeFileSync(DB_FILE,JSON.stringify(usersDB,null,2));}
+function saveMsg(){fs.writeFileSync(MSG_FILE,JSON.stringify(messagesDB,null,2));}
+function getChatId(a,b){return [a,b].sort().join('_');}
+
+app.get('/',(req,res)=>res.json({status:'Whispr Real-time API - Messages exchanged via backend',users:Object.keys(usersDB).length,chats:Object.keys(messagesDB).length}));
+
+app.post('/api/register',(req,res)=>{
+  const{userId,email,password,name,dob}=req.body;
+  if(!userId||!email||!password){return res.status(400).json({error:'Username, Email, Password required'});}
+  if(userId.length<3){return res.status(400).json({error:'Username min 3 chars'});}
+  if(password.length<4){return res.status(400).json({error:'Password min 4 chars'});}
+  if(usersDB[userId]){return res.status(400).json({error:'Username already exists'});}
+  const emailExists=Object.values(usersDB).find(u=>u.email.toLowerCase()===email.toLowerCase());
+  if(emailExists){return res.status(400).json({error:'Email already registered'});}
+  if(dob){
+    const age=Math.abs(new Date(Date.now()-new Date(dob).getTime()).getUTCFullYear()-1970);
+    if(age<16){return res.status(400).json({error:'Must be 16+ Age '+age});}
   }
-  if(search){const s=search.toLowerCase();list=list.filter(u=>u.userId.toLowerCase().includes(s)||(u.bio&&u.bio.toLowerCase().includes(s))||(u.location&&u.location.toLowerCase().includes(s)));} 
-  if(minAge)list=list.filter(u=>u.age>=parseInt(minAge));
-  if(maxAge)list=list.filter(u=>u.age<=parseInt(maxAge));
-  if(gender&&gender!=='All')list=list.filter(u=>u.gender===gender);
-  if(state)list=list.filter(u=>u.state&&u.state.toLowerCase().includes(state.toLowerCase()));
-  if(country)list=list.filter(u=>u.country&&u.country.toLowerCase().includes(country.toLowerCase()));
-  if(location)list=list.filter(u=>u.location&&u.location.toLowerCase().includes(location.toLowerCase()));
-  if(interest)list=list.filter(u=>u.interests&&u.interests.some(i=>i.toLowerCase().includes(interest.toLowerCase())));
-  const publicList=list.map(u=>({userId:u.userId,age:u.age,gender:u.gender,state:u.state,country:u.country,location:u.location,bio:u.bio,interests:u.interests,profession:u.profession,lookingFor:u.lookingFor,avatar:u.avatar,createdAt:u.createdAt,lastActive:u.lastActive}));
-  res.json({total:publicList.length,users:publicList});
-});
-app.post('/api/prime/buy',(req,res)=>{
-  const{userId}=req.body;
-  if(!userId||!usersDB[userId]) return res.status(404).json({error:'User not found'});
-  const expiry=new Date(); expiry.setFullYear(expiry.getFullYear()+1);
-  usersDB[userId].isPrime=true;
-  usersDB[userId].primeExpiry=expiry.toISOString();
-  usersDB[userId].primeBoughtAt=new Date().toISOString();
-  saveDB();
-  res.json({success:true,isPrime:true,primeExpiry:expiry.toISOString(),price:'INR 399/year',message:'Prime activated for 1 year'});
+  const avatar=`https://api.dicebear.com/7.x/avataaars/svg?seed=${userId}`;
+  const user={userId,email,password,name:name||userId,dob:dob||null,age:dob?Math.abs(new Date(Date.now()-new Date(dob).getTime()).getUTCFullYear()-1970):null,avatar,createdAt:new Date().toISOString(),lastActive:new Date().toISOString()};
+  usersDB[userId]=user;saveDB();
+  const publicUser={...user};delete publicUser.password;
+  res.json({success:true,user:publicUser});
 });
 
-app.get('/api/user/:userId',(req,res)=>{const u=usersDB[req.params.userId];if(!u)return res.status(404).json({error:'Not found'});res.json({user:{userId:u.userId,age:u.age,gender:u.gender,location:u.location,bio:u.bio,interests:u.interests,profession:u.profession,lookingFor:u.lookingFor,avatar:u.avatar,createdAt:u.createdAt}});});
-app.post('/api/admin/login',(req,res)=>{const{username,password}=req.body;if((username==='admin')&&(password===ADMIN_KEY||password==='Whispr@2026'||password==='admin123')){return res.json({success:true,admin:true,adminKey:ADMIN_KEY});}res.status(401).json({error:'Invalid admin'});});
-app.get('/api/admin/all',(req,res)=>{const key=req.query.adminKey||req.headers['x-admin-key'];if(key!==ADMIN_KEY&&key!=='Whispr@2026'&&key!=='admin123')return res.status(401).json({error:'Unauthorized'});res.json({total:Object.keys(usersDB).length,users:Object.values(usersDB)});});
-app.delete('/api/admin/user/:userId',(req,res)=>{const key=req.query.adminKey||req.headers['x-admin-key'];if(key!==ADMIN_KEY&&key!=='Whispr@2026'&&key!=='admin123')return res.status(401).json({error:'Unauthorized'});if(usersDB[req.params.userId]){delete usersDB[req.params.userId];saveDB();return res.json({success:true});}res.status(404).json({error:'Not found'});});
-app.get('/api/token',async(req,res)=>{const userId=req.query.userId;if(!userId)return res.status(400).json({error:'userId required'});if(usersDB[userId])return res.json({accessToken:usersDB[userId].token,token:usersDB[userId].token,userId});if(MANUAL_TOKENS[userId])return res.json({accessToken:MANUAL_TOKENS[userId],token:MANUAL_TOKENS[userId],userId});try{const r=await requestTokenSG(userId);usersDB[userId]={userId,email:'',dob:'',age:null,token:r.token,createdAt:new Date().toISOString()};saveDB();return res.json({accessToken:r.token,token:r.token,userId});}catch(e){return res.status(500).json({error:'Failed'});}});
-const PORT=process.env.PORT||10000;app.listen(PORT,()=>console.log(`Whispr server running ${PORT}`));
+app.post('/api/login',(req,res)=>{
+  const{userId,email,password}=req.body;
+  const identifier=(userId||email||'').toLowerCase().trim();
+  if(!identifier||!password){return res.status(400).json({error:'Email/Username and Password required'});}
+  let user=usersDB[Object.keys(usersDB).find(k=>k.toLowerCase()===identifier)]||Object.values(usersDB).find(u=>u.email.toLowerCase()===identifier);
+  if(!user){return res.status(401).json({error:'User not found'});}
+  if(user.password!==password){return res.status(401).json({error:'Invalid password'});}
+  user.lastActive=new Date().toISOString();saveDB();
+  const publicUser={...user};delete publicUser.password;
+  res.json({success:true,user:publicUser});
+});
+
+app.get('/api/users',(req,res)=>{
+  const{search,requesterId}=req.query;
+  let list=Object.values(usersDB);
+  if(search){
+    const s=search.toLowerCase().trim();
+    list=list.filter(u=>u.userId.toLowerCase().includes(s)||u.email.toLowerCase().includes(s)||(u.name&&u.name.toLowerCase().includes(s)));
+  }
+  const publicList=list.map(u=>{const p={...u};delete p.password;return p;});
+  res.json({total:publicList.length,users:publicList});
+});
+
+// Real-time messaging endpoints
+app.post('/api/messages/send',(req,res)=>{
+  const{from,to,text}=req.body;
+  if(!from||!to||!text){return res.status(400).json({error:'from, to, text required'});}
+  if(!usersDB[from]||!usersDB[to]){return res.status(404).json({error:'User not found'});}
+  const chatId=getChatId(from,to);
+  if(!messagesDB[chatId]) messagesDB[chatId]=[];
+  const msg={id:Date.now()+'_'+Math.random().toString(36).substr(2,9),from,to,text:text.trim(),time:new Date().toISOString(),timeStr:new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})};
+  messagesDB[chatId].push(msg);
+  // Keep last 500 per chat
+  if(messagesDB[chatId].length>500) messagesDB[chatId]=messagesDB[chatId].slice(-500);
+  saveMsg();
+  // Update lastActive
+  if(usersDB[from]){usersDB[from].lastActive=new Date().toISOString();}
+  saveDB();
+  res.json({success:true,message:msg});
+});
+
+app.get('/api/messages/:userId/:otherId',(req,res)=>{
+  const{userId,otherId}=req.params;
+  const chatId=getChatId(userId,otherId);
+  const msgs=messagesDB[chatId]||[];
+  res.json({chatId,total:msgs.length,messages:msgs});
+});
+
+app.get('/api/chats/:userId',(req,res)=>{
+  const{userId}=req.params;
+  const chats=[];
+  Object.keys(messagesDB).forEach(chatId=>{
+    if(chatId.includes(userId)){
+      const parts=chatId.split('_');
+      const other=parts.find(p=>p!==userId);
+      if(other){
+        const msgs=messagesDB[chatId];
+        if(msgs.length>0){
+          const last=msgs[msgs.length-1];
+          chats.push({userId:other,chatId,lastMsg:last.text,lastTime:last.timeStr,lastTimeISO:last.time,total:msgs.length});
+        }
+      }
+    }
+  });
+  chats.sort((a,b)=>new Date(b.lastTimeISO)-new Date(a.lastTimeISO));
+  res.json({total:chats.length,chats});
+});
+
+app.delete('/api/messages/:userId/:otherId',(req,res)=>{
+  const{userId,otherId}=req.params;
+  const chatId=getChatId(userId,otherId);
+  if(messagesDB[chatId]){delete messagesDB[chatId];saveMsg();}
+  res.json({success:true,deleted:chatId});
+});
+
+app.get('/api/admin/all',(req,res)=>{
+  const{adminKey}=req.query;
+  if(adminKey!=='Whispr@2026'){return res.status(401).json({error:'Unauthorized'});}
+  res.json({total:Object.keys(usersDB).length,users:Object.values(usersDB),chats:Object.keys(messagesDB).length});
+});
+
+app.delete('/api/admin/user/:userId',(req,res)=>{
+  const{adminKey}=req.query;const{userId}=req.params;
+  if(adminKey!=='Whispr@2026'){return res.status(401).json({error:'Unauthorized'});}
+  if(usersDB[userId]){delete usersDB[userId];saveDB();}
+  // Delete all chats involving user
+  Object.keys(messagesDB).forEach(cid=>{if(cid.includes(userId)) delete messagesDB[cid];});
+  saveMsg();
+  res.json({success:true});
+});
+
+const PORT=process.env.PORT||3000;
+app.listen(PORT,()=>console.log('Whispr REAL-TIME API running on '+PORT));
