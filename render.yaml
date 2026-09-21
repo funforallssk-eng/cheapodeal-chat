@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: cheapodeal-token
+    env: node
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NEXCONN_APP_SECRET
+        sync: false
+      - key: NODE_VERSION
+        value: 18
