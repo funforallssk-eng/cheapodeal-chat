@@ -1,181 +1,194 @@
-const express = require('express');
-const cors = require('cors');
-const app = express();
+const express=require('express');
+const cors=require('cors');
+const crypto=require('crypto');
+const app=express();
+app.use(cors({origin:'*'}));
+app.use(express.json({limit:'10mb'}));
 
-app.use(cors({ origin: '*' }));
-app.use(express.json());
+const APP_KEY=process.env.NEXCONN_APP_KEY||'YOUR_APP_KEY_HERE';
+const APP_SECRET=process.env.NEXCONN_APP_SECRET||'YOUR_APP_SECRET_HERE';
+const PRIMARY=process.env.NEXCONN_PRIMARY_DOMAIN||'api.sg-light-api.com';
 
-let usersDB = {};
-let messagesDB = {};
+function genNonce(){return Math.random().toString(36).substring(2,12);}
+function genSig(secret,nonce,ts){return crypto.createHash('sha1').update(secret+nonce+ts).digest('hex');}
 
-// Try to load existing files if they exist
-try {
-  const fs = require('fs');
-  const path = require('path');
-  const f = path.join(__dirname, 'users.json');
-  if (fs.existsSync(f)) {
-    usersDB = JSON.parse(fs.readFileSync(f, 'utf8'));
-    console.log('Loaded', Object.keys(usersDB).length, 'users from file');
+async function nexconn(endpoint,body){
+  const nonce=genNonce();
+  const ts=Date.now().toString();
+  const sig=genSig(APP_SECRET,nonce,ts);
+  const url=`https://${PRIMARY}${endpoint}`;
+  try{
+    const res=await fetch(url,{
+      method:'POST',
+      headers:{'App-Key':APP_KEY,'Nonce':nonce,'Timestamp':ts,'Signature':sig,'Content-Type':'application/json'},
+      body:JSON.stringify(body)
+    });
+    const txt=await res.text();
+    let data; try{data=JSON.parse(txt);}catch(e){data={raw:txt};}
+    return {status:res.status,data,ok:res.ok && data.code===0};
+  }catch(e){
+    return {status:500,data:{code:-1,error:e.message},ok:false};
   }
-  const mf = path.join(__dirname, 'messages.json');
-  if (fs.existsSync(mf)) {
-    messagesDB = JSON.parse(fs.readFileSync(mf, 'utf8'));
-  }
-} catch (e) {
-  console.log('No existing files, starting fresh');
 }
 
-function saveUsers() {
-  try {
-    const fs = require('fs');
-    const path = require('path');
-    fs.writeFileSync(path.join(__dirname, 'users.json'), JSON.stringify(usersDB, null, 2));
-  } catch (e) { console.log('Save failed', e.message); }
+let users={}, friends={}, messages={}, typingStatus={};
+
+try{
+  const fs=require('fs'), path=require('path');
+  const load=(f)=>{try{if(fs.existsSync(path.join(__dirname,f))) return JSON.parse(fs.readFileSync(path.join(__dirname,f),'utf8'));}catch(e){} return null;};
+  users=load('users.json')||{};
+  friends=load('friends.json')||{};
+  messages=load('messages.json')||{};
+}catch(e){}
+
+function saveAll(){
+  try{
+    const fs=require('fs'), path=require('path');
+    fs.writeFileSync(path.join(__dirname,'users.json'),JSON.stringify(users,null,2));
+    fs.writeFileSync(path.join(__dirname,'friends.json'),JSON.stringify(friends,null,2));
+    fs.writeFileSync(path.join(__dirname,'messages.json'),JSON.stringify(messages,null,2));
+  }catch(e){console.log('Save error',e.message);}
 }
 
-function saveMsgs() {
-  try {
-    const fs = require('fs');
-    const path = require('path');
-    fs.writeFileSync(path.join(__dirname, 'messages.json'), JSON.stringify(messagesDB, null, 2));
-  } catch (e) {}
-}
+function chatId(a,b){return [a,b].sort().join('_');}
 
-function getChatId(a, b) {
-  return [a, b].sort().join('_');
-}
-
-// Root - shows user count
-app.get('/', (req, res) => {
+app.get('/',(req,res)=>{
   res.json({
-    status: 'Whispr OK - Fixed',
-    users: Object.keys(usersDB).length,
-    chats: Object.keys(messagesDB).length,
-    message: 'If 0 users, register from frontend - it will save here',
-    timestamp: new Date().toISOString()
+    status:'Whispr Backend FIXED - All endpoints ready',
+    endpoints:['POST /api/register','POST /api/login','GET /api/users?search=','POST /api/friends/add','GET /api/friends/list?userId=','POST /api/messages/send','GET /api/messages/:userId/:otherId','DELETE /api/messages/:userId/:otherId','POST /api/typing','GET /api/typing/:from/:to'],
+    users:Object.keys(users).length,
+    chats:Object.keys(messages).length,
+    friends:Object.keys(friends).length,
+    nexconnConfigured: APP_KEY!=='YOUR_APP_KEY_HERE'
   });
 });
 
-app.get('/api/debug', (req, res) => {
-  res.json({ users: usersDB, messagesCount: Object.keys(messagesDB).length });
+// REGISTER - Username+DOB only
+app.post('/api/register',async(req,res)=>{
+  console.log('REGISTER',req.body);
+  const{userId,dob,name}=req.body;
+  if(!userId||!dob) return res.status(400).json({success:false,error:'Username and DOB required'});
+  if(users[userId]) return res.status(400).json({success:false,error:'Username already exists - try login'});
+  const avatar=`https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(userId)}`;
+  let tokenResult=null;
+  if(APP_KEY!=='YOUR_APP_KEY_HERE'){
+    const r=await nexconn('/v4/auth/access-token/issue',{userId,name:name||userId,avatarUrl:avatar});
+    if(r.ok) tokenResult=r.data.result;
+  }
+  const user={userId,dob,name:name||userId,avatar,avatarUrl:avatar,email:userId+'@whispr.local',password:dob,accessToken:tokenResult?.accessToken||null,createdAt:new Date().toISOString()};
+  users[userId]=user; saveAll();
+  const pub={...user}; delete pub.password;
+  res.json({success:true,user:pub,totalUsers:Object.keys(users).length});
 });
 
-// REGISTER - Only Username + DOB (as you asked)
-app.post('/api/register', (req, res) => {
-  console.log('REGISTER attempt', req.body);
-  const { userId, dob, name } = req.body;
-
-  if (!userId) {
-    return res.status(400).json({ success: false, error: 'Username required' });
-  }
-  if (!dob) {
-    return res.status(400).json({ success: false, error: 'DOB required' });
-  }
-  if (usersDB[userId]) {
-    return res.status(400).json({ success: false, error: 'Username already exists - try login' });
-  }
-
-  const user = {
-    userId: userId,
-    dob: dob,
-    name: name || userId,
-    avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=' + userId,
-    email: userId + '@whispr.local',
-    password: dob,
-    createdAt: new Date().toISOString(),
-    lastActive: new Date().toISOString()
-  };
-
-  usersDB[userId] = user;
-  saveUsers();
-  console.log('REGISTERED', userId, 'total users', Object.keys(usersDB).length);
-
-  const pub = {...user };
-  delete pub.password;
-  res.json({ success: true, user: pub, totalUsers: Object.keys(usersDB).length });
+app.post('/api/login',async(req,res)=>{
+  console.log('LOGIN',req.body);
+  const{userId,dob}=req.body;
+  if(!userId) return res.status(400).json({success:false,error:'Username required'});
+  let user=users[userId]||users[Object.keys(users).find(k=>k.toLowerCase()===userId.toLowerCase())];
+  if(!user) return res.status(401).json({success:false,error:'User not found - register first'});
+  const pub={...user}; delete pub.password;
+  res.json({success:true,user:pub});
 });
 
-// LOGIN - Username + DOB
-app.post('/api/login', (req, res) => {
-  const { userId, dob } = req.body;
-  console.log('LOGIN attempt', userId, dob);
-
-  if (!userId) {
-    return res.status(400).json({ success: false, error: 'Username required' });
+app.get('/api/users',(req,res)=>{
+  const{search}=req.query;
+  let list=Object.values(users).map(u=>{let p={...u};delete p.password;return p;});
+  if(search){
+    const s=search.toLowerCase().trim();
+    list=list.filter(u=>u.userId.toLowerCase().includes(s));
   }
-
-  const user = usersDB[userId] || usersDB[Object.keys(usersDB).find(k => k.toLowerCase() === userId.toLowerCase())];
-
-  if (!user) {
-    return res.status(401).json({ success: false, error: 'User not found - register first' });
-  }
-
-  user.lastActive = new Date().toISOString();
-  saveUsers();
-
-  const pub = {...user };
-  delete pub.password;
-  res.json({ success: true, user: pub });
+  res.set('Cache-Control','no-store');
+  res.json({total:list.length,users:list});
 });
 
-// Get all users / search by username
-app.get('/api/users', (req, res) => {
-  const { search } = req.query;
-  let list = Object.values(usersDB).map(u => {
-    let p = {...u };
-    delete p.password;
-    return p;
-  });
-  if (search) {
-    const s = search.toLowerCase().trim();
-    list = list.filter(u => u.userId.toLowerCase().includes(s));
+// FRIENDS - FIXED - This was missing before causing JSON error
+app.post('/api/friends/add',(req,res)=>{
+  console.log('FRIENDS ADD',req.body);
+  const{userId,friendId}=req.body;
+  if(!userId||!friendId) return res.status(400).json({success:false,error:'userId and friendId required'});
+  if(userId===friendId) return res.status(400).json({success:false,error:'Cannot add yourself'});
+  if(!users[friendId]) return res.status(404).json({success:false,error:'User '+friendId+' not found - register first'});
+  if(!users[userId]) return res.status(404).json({success:false,error:'Your user not found'});
+  if(!friends[userId]) friends[userId]=[];
+  if(friends[userId].includes(friendId)) return res.json({success:true,message:'Already friends',friendId});
+  friends[userId].push(friendId);
+  if(!friends[friendId]) friends[friendId]=[];
+  if(!friends[friendId].includes(userId)) friends[friendId].push(userId);
+  saveAll();
+  res.json({success:true,friendId,friends:friends[userId]});
+});
+
+app.get('/api/friends/list',(req,res)=>{
+  const{userId}=req.query;
+  if(!userId) return res.status(400).json({success:false,error:'userId required'});
+  const list=friends[userId]||[];
+  const detailed=list.map(fid=>users[fid]).filter(Boolean).map(u=>{let p={...u};delete p.password;return p;});
+  if(detailed.length===0){
+    res.json({total:list.length,friends:list.map(id=>({friendId:id,userId:id}))});
+  }else{
+    res.json({total:detailed.length,friends:detailed.map(u=>({friendId:u.userId,...u}))});
   }
-  res.set('Cache-Control', 'no-store');
-  res.json({ total: list.length, users: list });
 });
 
-// Send message - 1 second sync
-app.post('/api/messages/send', (req, res) => {
-  const { from, to, text } = req.body;
-  console.log('SEND', from, '->', to, text?.substring(0, 20));
+// MESSAGES - FIXED - 0.3s sync + emoji/gif/sticker
+app.post('/api/messages/send',(req,res)=>{
+  console.log('SEND MSG',req.body);
+  const{from,to,text}=req.body;
+  if(!from||!to||!text) return res.status(400).json({success:false,error:'from,to,text required'});
+  if(!users[from]) return res.status(404).json({success:false,error:'Sender not found'});
+  if(!users[to]) return res.status(404).json({success:false,error:'Recipient not found'});
+  const id=chatId(from,to);
+  if(!messages[id]) messages[id]=[];
+  const msg={id:Date.now(),from,to,text:text.trim(),time:new Date().toISOString(),timeStr:new Date().toLocaleTimeString()};
+  messages[id].push(msg);
+  if(messages[id].length>1000) messages[id]=messages[id].slice(-1000);
+  saveAll();
+  res.json({success:true,message:msg});
+});
 
-  if (!from ||!to ||!text) {
-    return res.status(400).json({ error: 'from,to,text required' });
+app.get('/api/messages/:userId/:otherId',(req,res)=>{
+  const{userId,otherId}=req.params;
+  const id=chatId(userId,otherId);
+  res.set('Cache-Control','no-store');
+  res.json({chatId:id,total:(messages[id]||[]).length,messages:messages[id]||[]});
+});
+
+app.delete('/api/messages/:userId/:otherId',(req,res)=>{
+  const{userId,otherId}=req.params;
+  const id=chatId(userId,otherId);
+  delete messages[id];
+  saveAll();
+  res.json({success:true});
+});
+
+// TYPING INDICATOR - 0.3s sync
+app.post('/api/typing',(req,res)=>{
+  const{from,to,typing}=req.body;
+  if(!from||!to) return res.status(400).json({error:'from,to required'});
+  const id=chatId(from,to);
+  if(typing){
+    typingStatus[id]={from,to,typing:true,time:Date.now()};
+  }else{
+    delete typingStatus[id];
   }
-
-  const chatId = getChatId(from, to);
-  if (!messagesDB[chatId]) messagesDB[chatId] = [];
-
-  const msg = {
-    id: Date.now(),
-    from,
-    to,
-    text: text.trim(),
-    time: new Date().toISOString(),
-    timeStr: new Date().toLocaleTimeString()
-  };
-
-  messagesDB[chatId].push(msg);
-  if (messagesDB[chatId].length > 500) messagesDB[chatId] = messagesDB[chatId].slice(-500);
-  saveMsgs();
-
-  res.json({ success: true, message: msg });
+  res.json({success:true});
 });
 
-// Get messages - 1 sec sync, no cache
-app.get('/api/messages/:userId/:otherId', (req, res) => {
-  const { userId, otherId } = req.params;
-  const chatId = getChatId(userId, otherId);
-  res.set('Cache-Control', 'no-store');
-  res.json({ chatId, total: (messagesDB[chatId] || []).length, messages: messagesDB[chatId] || [] });
+app.get('/api/typing/:from/:to',(req,res)=>{
+  const{from,to}=req.params;
+  const id=chatId(from,to);
+  const status=typingStatus[id];
+  if(status && Date.now()-status.time>3000){
+    delete typingStatus[id];
+    return res.json({typing:false});
+  }
+  if(status && status.from===from){
+    res.json({typing:true,from:status.from,time:status.time});
+  }else{
+    res.json({typing:false});
+  }
 });
 
-app.get('/api/chats/:userId', (req, res) => {
-  const { userId } = req.params;
-  const chats = [];
-  Object.keys(messagesDB).forEach(chatId => {
-    if (chatId.includes(userId)) {
-      const parts = chatId.split('_');
-      const other = parts.find(p => p!== userId);
-      if (other && messagesDB[chatId].length > 0) {
-        const last = messagesDB[chatId][messagesDB[chatId].length - 1];
+const PORT=process.env.PORT||3000;
+app.listen(PORT,()=>console.log('Whispr Backend FIXED - All endpoints ready on '+PORT));
